@@ -147,10 +147,10 @@ export default function Home() {
               // Build the function output with the actual answer
               let functionOutput: string;
               if (snippets.length === 0) {
-                functionOutput = 'לא נמצא מידע רלוונטי במסמכים.';
+                functionOutput = 'No information found in documents.';
               } else {
-                // Return the content naturally as a search result
-                functionOutput = snippets[0];
+                // Return with strong directive to use the content
+                functionOutput = `DOCUMENT CONTENT (USE THIS TO ANSWER):\n\n${snippets[0]}\n\nYOU MUST use this information to answer the user's question.`;
               }
               
               // Send the function call output with the actual content
