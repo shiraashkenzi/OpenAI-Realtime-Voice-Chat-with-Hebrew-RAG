@@ -17,7 +17,7 @@ export const SEARCH_PDFS_TOOL = {
   type: 'function',
   name: 'search_pdfs',
   description:
-    'Search the knowledge base for relevant information. Use this tool to find specific information from company documents like policies, standards, and guidelines. Returns raw text snippets from the most relevant sections.',
+    'Search company documents and return exact text from employee handbook. This tool provides AUTHORITATIVE information that you MUST use to answer. The results are from official company documents.',
   parameters: {
     type: 'object',
     properties: {
@@ -89,6 +89,7 @@ export async function handleSearchPdfs(query: string): Promise<{
 
     // Transform to MCP tool output format
     const results: SearchResultItem[] = rawResults.map((result) => {
+      const score = parseFloat((result.relevanceScore * 100).toFixed(1));
       return {
         source_document: result.chunk.documentName,
         relevance_score: score,

@@ -92,17 +92,9 @@ export default function Home() {
         console.error('❌ Realtime Connection error:', event);
       });
 
-      // Response handlers (silent except errors)
+      // Response errors
       client.on('response.error', (event: any) => {
-        console.error('❌ response.error:', event);
-      });
-      client.on('response.function_call_arguments.delta', (event: any) => {
-      });
-      client.on('response.function_call_arguments.done', (event: any) => {
-        console.log('✅ function_call_arguments.done', {
-          arguments: event.arguments,
-          name: event.name,
-        });
+        console.error('❌ Response error:', event);
       });
 
       // Handle tool calls when output item is complete (arguments are fully assembled)
@@ -136,31 +128,50 @@ export default function Home() {
             }
 
             const result = await response.json();
+            console.log('✅ Tool result received:', result);
 
             // Submit tool result back to the client
             if (result.tool_result) {
+              console.log('📦 Tool result has data:', result.tool_result);
               
               // Extract just the text snippets and combine them
               const results = result.tool_result.results || [];
               const snippets = results.map((r: any) => r.text_snippet).filter(Boolean);
+              console.log(`📄 Got ${snippets.length} snippets`);
               
-              // Build the function output with the actual answer
-              let functionOutput: string;
-              if (snippets.length === 0) {
-                functionOutput = 'No information found in documents.';
+              if (snippets.length > 0) {
+                // Put ALL snippets directly in function_call_output
+                const allSnippets = snippets.map((s: string, i: number) => 
+                  `קטע ${i + 1}:\n${s}`
+                ).join('\n\n---\n\n');
+                
+                const outputWithContext = `נמצאו ${snippets.length} קטעים רלוונטיים מהמסמכים:\n\n${allSnippets}\n\nעכשיו ענה על השאלה בעברית על סמך המידע שמצאתי.`;
+                
+                console.log('💉 Injecting', snippets.length, 'snippets directly in function_call_output...');
+                
+                // Send function_call_output WITH all the context inside
+                await client.realtime.send('conversation.item.create', {
+                  item: {
+                    type: 'function_call_output',
+                    call_id: item.call_id,
+                    output: outputWithContext,
+                  },
+                });
+                
+                // CRITICAL: Explicitly trigger response AFTER sending tool output
+                // This ensures model has the tool results before answering
+                console.log('🎯 Triggering response with tool context...');
+                await client.createResponse();
               } else {
-                // Return with strong directive to use the content
-                functionOutput = `DOCUMENT CONTENT (USE THIS TO ANSWER):\n\n${snippets[0]}\n\nYOU MUST use this information to answer the user's question.`;
+                // No results
+                await client.realtime.send('conversation.item.create', {
+                  item: {
+                    type: 'function_call_output',
+                    call_id: item.call_id,
+                    output: 'לא נמצאו תוצאות',
+                  },
+                });
               }
-              
-              // Send the function call output with the actual content
-              client.realtime.send('conversation.item.create', {
-                item: {
-                  type: 'function_call_output',
-                  call_id: item.call_id,
-                  output: functionOutput,
-                },
-              });
             } else {
               console.error('❌ No tool_result in response:', result);
               client.realtime.send('conversation.item.create', {
@@ -188,41 +199,12 @@ export default function Home() {
         }
       });
 
-      // DEBUG: Log errors
-      client.realtime.on('server.*', (event: any) => {
-        if (event.type === 'error') {
-          console.error('❌ ERROR EVENT:', JSON.stringify(event.error, null, 2));
-        }
-      });
-
-      // Input audio buffer events (silent)
-      client.on('input_audio_buffer.committed', (event: any) => {
-        console.log('✅ Input audio buffer committed');
-      });
-      
-      // Use client.realtime.on for raw server events
+      // Transcription completion - trigger response
       client.realtime.on('server.conversation.item.input_audio_transcription.completed', (event: any) => {
         const transcript = event?.transcript || '';
-        console.log('📝📝📝 Transcription completed:', transcript);
-        console.log('📝 Transcript length:', transcript.length, 'Trimmed length:', transcript.trim().length);
-        // Response is already in progress from createResponse() call after commit
-      });
-      
-      client.on('response.audio_transcript.delta', (event: any) => {
-        if (event.delta) {
-          console.log('🔊 AI Response (partial):', event.delta);
+        if (transcript.trim().length > 0) {
+          client.createResponse();
         }
-      });
-      
-      client.on('response.audio_transcript.done', (event: any) => {
-        console.log('🔊🔊🔊 AI FULL RESPONSE:', event.transcript);
-      });
-      
-      client.on('response.done', (event: any) => {
-        console.log('✅✅✅ RESPONSE COMPLETE:', {
-          status: event.response?.status,
-          output: event.response?.output
-        });
       });
 
       client.on('conversation.interrupted', async () => {
@@ -232,21 +214,8 @@ export default function Home() {
           await client.cancelResponse(trackId, offset);
         }
       });
-
-      // Handle response completion
-      client.on('response.done', () => {
-        // Response completed
-      });
       
       client.on('conversation.updated', async ({ item, delta }: any) => {
-        // ONLY process text content when response is completed
-        if (item?.type === 'message' && item?.role === 'assistant' && item?.status === 'completed') {
-          // Get the full text from item.formatted.text (which is populated when completed)
-          const aiText = item?.formatted?.text || item?.content?.[0]?.text || '';
-          
-          // Don't show search mechanics - AI handles it internally
-        }
-        
         const items = client.conversation.getItems();
         if (delta?.audio) {
           wavStreamPlayer.add16BitPCM(delta.audio, item.id);
@@ -262,27 +231,36 @@ export default function Home() {
         setItems(items);
       });
 
-      // Connect audio streams BEFORE connecting to Realtime
-      console.log('🔌 Connecting audio streams...');
+      // Connect audio streams
       await wavRecorder.begin();
       await wavStreamPlayer.connect();
       
-      // NOW connect to Realtime and update session
-      console.log('🔌 Connecting to Realtime API...');
+      // Connect to Realtime API
       await client.connect();
-      console.log('✅ Connected to Realtime API');
 
-      // Update session with tools AFTER connecting
-      console.log('🔧 Updating session with tools and instructions...');
+      // Update session with tools
       client.updateSession({ 
-        modalities: ['text', 'audio'],
         instructions: instructions,
-        input_audio_transcription: { model: 'whisper-1' },
+        input_audio_transcription: { 
+          model: 'whisper-1',
+        },
         tools: toolsConfig,
-        tool_choice: 'auto',
+        turn_detection: null,
       });
-      console.log('🧠 INSTRUCTIONS SENT TO SESSION:\n', instructions);
-      console.log('✅ Session updated with tools');
+
+      // Pre-load RAG documents
+      try {
+        await fetch('/api/tools/call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tool_name: 'search_pdfs',
+            tool_arguments: { query: 'מידע כללי' }
+          })
+        });
+      } catch (e) {
+        // RAG will initialize on first query
+      }
 
       // Set connected state
       setIsConnected(true);
@@ -340,9 +318,6 @@ export default function Home() {
         if (client.isConnected()) {
           client.appendInputAudio(data.mono);
           recordedChunkCountRef.current++;
-          if (recordedChunkCountRef.current % 50 === 0) {
-            console.log('🎙️ Appended audio chunks:', recordedChunkCountRef.current);
-          }
         }
       });
     } catch (error) {
@@ -352,35 +327,14 @@ export default function Home() {
   };
 
   const stopRecording = async () => {
-    if (!clientRef.current || !wavRecorderRef.current) {
-      console.error('Audio devices not initialized');
-      return;
-    }
-
-    if (!isRecording) {
-      console.warn('⚠️ stopRecording called but not recording');
-      return;
-    }
+    if (!clientRef.current || !wavRecorderRef.current || !isRecording) return;
 
     setIsRecording(false);
-    const wavRecorder = wavRecorderRef.current;
-    await wavRecorder.pause();
+    await wavRecorderRef.current.pause();
     
-    // Trigger AI response - it will automatically commit the audio buffer
     if (recordedChunkCountRef.current > 0) {
-      console.log(`🎙️ Total chunks recorded: ${recordedChunkCountRef.current}`);
-      
-      try {
-        // Just call createResponse() - it handles the commit internally
-        clientRef.current.createResponse();
-        console.log('📡 AI response triggered (will auto-commit audio)');
-      } catch (e) {
-        console.error('❌ Failed to trigger response:', e);
-      }
-      
+      await clientRef.current.realtime.send('input_audio_buffer.commit', {});
       recordedChunkCountRef.current = 0;
-    } else {
-      console.warn('⚠️ No audio recorded');
     }
   };
 
@@ -401,6 +355,7 @@ export default function Home() {
               
               // Skip if message is only JSON (tool calls)
               const text = item.formatted.text || item.formatted.transcript || '';
+              
               if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
                 return null;
               }

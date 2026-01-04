@@ -99,15 +99,18 @@ Feel free to ask me about any topic from the knowledge base. I can search for sp
       modalities: ['text', 'audio'],
       voice: 'alloy',
       instructions: enhancedInstructions,
-      input_audio_transcription: { model: 'whisper-1' },
+      input_audio_format: 'pcm16',
+      input_audio_transcription: { 
+        model: 'whisper-1'
+        // Removed language hint - let Whisper auto-detect
+        // Hebrew hint doesn't work reliably on first utterance
+      },
       tools: [toolDefinition],
       tool_choice: 'auto',
+      turn_detection: null,
     };
 
-    console.log('\n🔴🔴🔴 CREATING REALTIME SESSION 🔴🔴🔴');
-    console.log('📋 Tool format for Realtime API:');
-    console.log(JSON.stringify(toolDefinition, null, 2));
-    console.log('🔴🔴🔴 END PAYLOAD 🔴🔴🔴\n');
+
 
     const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
       method: 'POST',

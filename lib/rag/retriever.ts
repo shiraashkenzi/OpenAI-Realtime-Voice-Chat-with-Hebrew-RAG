@@ -38,8 +38,8 @@ export class DocumentRetriever {
   private inverseDocumentFrequency: Map<string, number> = new Map(); // term -> count
 
   constructor(config?: RetrieverConfig) {
-    this.topK = config?.topK || 3;
-    this.relevanceThreshold = config?.relevanceThreshold || 0.3;
+    this.topK = config?.topK || 5;
+    this.relevanceThreshold = config?.relevanceThreshold || 0.15;
     this.minChunkLength = config?.minChunkLength || 50;
   }
 

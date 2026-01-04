@@ -2,12 +2,16 @@ import { loadDocuments, Document } from './pdf-loader';
 import { chunkDocuments, Chunk } from './chunker';
 import { createRetriever, DocumentRetriever, formatSearchResults } from './retriever';
 
+// Global singleton for serverless environments
+declare global {
+  var ragManager: RAGManager | undefined;
+}
+
 /**
  * RAGManager - Orchestrates PDF loading, chunking, and retrieval
  * Singleton pattern - initializes once on first use
  */
 export class RAGManager {
-  private static instance: RAGManager | null = null;
   private retriever: DocumentRetriever | null = null;
   private documents: Document[] = [];
   private chunks: Chunk[] = [];
@@ -16,13 +20,13 @@ export class RAGManager {
   private constructor() {}
 
   /**
-   * Get or create singleton instance
+   * Get or create singleton instance (using global for serverless)
    */
   static getInstance(): RAGManager {
-    if (!RAGManager.instance) {
-      RAGManager.instance = new RAGManager();
+    if (!global.ragManager) {
+      global.ragManager = new RAGManager();
     }
-    return RAGManager.instance;
+    return global.ragManager;
   }
 
   /**
