@@ -1,12 +1,24 @@
 'use client';
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { RealtimeClient } from '@openai/realtime-api-beta';
 import { ItemType, ToolDefinitionType } from '@openai/realtime-api-beta/dist/lib/client';
 import { WavRecorder, WavStreamPlayer } from '../lib/wavtools/index';
 import { instructions } from './constants';
+import { AUDIO_CONFIG, TEXT_ANALYSIS } from './constants/config';
+import { isGreeting, hasQuestionIndicator } from './constants/patterns';
+import { logger } from '@/utils/logger';
+import { sanitizeInput } from '@/utils/sanitize';
+import type { 
+  ServerResponseEvent, 
+  ToolArguments, 
+  ToolCallResponse,
+  SearchCache,
+  TranscriptionEvent,
+  ConversationUpdateEvent 
+} from './types/chat.types';
 
-import { Mic, Phone, PhoneOff, Send } from "lucide-react"
+import { Mic, Phone, PhoneOff, Send, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -16,24 +28,88 @@ export default function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const wavRecorderRef = useRef<WavRecorder>(new WavRecorder({ sampleRate: 24000 }));
-  const wavStreamPlayerRef = useRef<WavStreamPlayer>(new WavStreamPlayer({ sampleRate: 24000 }));
+  const wavRecorderRef = useRef<WavRecorder | null>(null);
+  const wavStreamPlayerRef = useRef<WavStreamPlayer | null>(null);
   const clientRef = useRef<RealtimeClient | null>(null);
   const recordedChunkCountRef = useRef<number>(0);
-
+  const searchCacheRef = useRef<Map<string, SearchCache>>(new Map());
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Initialize audio objects only once
+  useEffect(() => {
+    if (!wavRecorderRef.current) {
+      wavRecorderRef.current = new WavRecorder({ sampleRate: AUDIO_CONFIG.SAMPLE_RATE });
+    }
+    if (!wavStreamPlayerRef.current) {
+      wavStreamPlayerRef.current = new WavStreamPlayer({ sampleRate: AUDIO_CONFIG.SAMPLE_RATE });
+    }
+
+    return () => {
+      // Cleanup is handled by disconnectConversation
+      // Don't call end() or pause() here - they throw if not started
+    };
+  }, []);
+
+  /**
+   * Perform document search with caching
+   */
+  const performSearch = useCallback(async (query: string): Promise<ToolCallResponse | null> => {
+    const sanitizedQuery = sanitizeInput(query);
+    
+    // Check cache first
+    const cached = searchCacheRef.current.get(sanitizedQuery);
+    if (cached && Date.now() - cached.timestamp < TEXT_ANALYSIS.SEARCH_CACHE_TTL_MS) {
+      logger.log('📦 Using cached search results for:', sanitizedQuery);
+      return cached.data;
+    }
+
+    // Perform fresh search
+    try {
+      const response = await fetch('/api/tools/call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tool_name: 'search_pdfs',
+          tool_arguments: { query: sanitizedQuery }
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Search failed with status: ${response.status}`);
+      }
+
+      const result: ToolCallResponse = await response.json();
+      
+      // Cache the result
+      searchCacheRef.current.set(sanitizedQuery, {
+        data: result,
+        timestamp: Date.now()
+      });
+
+      return result;
+    } catch (error) {
+      logger.error('❌ Search failed:', error);
+      throw error;
+    }
+  }, []);
 
   const connectConversation = useCallback(async () => {
     // Prevent multiple simultaneous connection attempts
     if (isConnecting || isConnected) {
-      console.log('Already connecting or connected');
+      logger.log('Already connecting or connected');
       return;
     }
 
-    if (!wavRecorderRef.current || !wavStreamPlayerRef.current) return;
+    if (!wavRecorderRef.current || !wavStreamPlayerRef.current) {
+      setError('Audio devices not initialized');
+      return;
+    }
 
     setIsConnecting(true);
+    setError(null);
 
     try {
       // Ensure clean state by ending any previous session
@@ -48,7 +124,7 @@ export default function Home() {
       
       if (!tokenResponse.ok) {
         const error = await tokenResponse.json();
-        console.error('Failed to get session token:', error);
+        logger.error('Failed to get session token:', error);
         throw new Error(error.error || 'Failed to get session token');
       }
 
@@ -88,56 +164,41 @@ export default function Home() {
       ];
 
       // Set up error handler FIRST
-      client.on('error', (event: any) => {
-        console.error('❌ Realtime Connection error:', event);
+      client.on('error', (event: unknown) => {
+        logger.error('❌ Realtime Connection error:', event);
+        setError('Connection error occurred');
       });
 
       // Response errors
-      client.on('response.error', (event: any) => {
-        console.error('❌ Response error:', event);
+      client.on('response.error', (event: unknown) => {
+        logger.error('❌ Response error:', event);
+        setError('Response error occurred');
       });
 
       // Handle tool calls when output item is complete (arguments are fully assembled)
       // CRITICAL: Use client.realtime.on to catch server events
-      client.realtime.on('server.response.output_item.done', async (event: any) => {
+      client.realtime.on('server.response.output_item.done', async (event: ServerResponseEvent) => {
         const item = event.item;
         
         if (item?.type === 'function_call') {
-          console.log('🔧 Function call:', item.name, item.call_id);
+          logger.log('🔧 Function call:', item.name, item.call_id);
           
           try {
-            const args = typeof item.arguments === 'string' 
+            const args: ToolArguments = typeof item.arguments === 'string' 
               ? JSON.parse(item.arguments) 
-              : item.arguments;
+              : (item.arguments as unknown as ToolArguments);
             
-            // Call tool handler
-            const response = await fetch('/api/tools/call', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                tool_name: item.name,
-                tool_arguments: args,
-              }),
-            });
-
-            if (!response.ok) {
-              console.error('❌ API returned error:', response.status, response.statusText);
-              const errorText = await response.text();
-              console.error('❌ Error response body:', errorText);
-              throw new Error(`API error: ${response.status}`);
-            }
-
-            const result = await response.json();
-            console.log('✅ Tool result received:', result);
+            // Call tool handler using cached search
+            const searchResult = await performSearch(args.query);
 
             // Submit tool result back to the client
-            if (result.tool_result) {
-              console.log('📦 Tool result has data:', result.tool_result);
+            if (searchResult?.tool_result) {
+              logger.log('📦 Tool result has data:', searchResult.tool_result);
               
               // Extract just the text snippets and combine them
-              const results = result.tool_result.results || [];
-              const snippets = results.map((r: any) => r.text_snippet).filter(Boolean);
-              console.log(`📄 Got ${snippets.length} snippets`);
+              const results = searchResult.tool_result.results || [];
+              const snippets = results.map((r) => r.text_snippet).filter(Boolean);
+              logger.log(`📄 Got ${snippets.length} snippets`);
               
               if (snippets.length > 0) {
                 // Put ALL snippets directly in function_call_output
@@ -147,7 +208,7 @@ export default function Home() {
                 
                 const outputWithContext = `נמצאו ${snippets.length} קטעים רלוונטיים מהמסמכים:\n\n${allSnippets}\n\nעכשיו ענה על השאלה בעברית על סמך המידע שמצאתי.`;
                 
-                console.log('💉 Injecting', snippets.length, 'snippets directly in function_call_output...');
+                logger.log('💉 Injecting', snippets.length, 'snippets directly in function_call_output...');
                 
                 // Send function_call_output WITH all the context inside
                 await client.realtime.send('conversation.item.create', {
@@ -160,7 +221,7 @@ export default function Home() {
                 
                 // CRITICAL: Explicitly trigger response AFTER sending tool output
                 // This ensures model has the tool results before answering
-                console.log('🎯 Triggering response with tool context...');
+                logger.log('🎯 Triggering response with tool context...');
                 await client.createResponse();
               } else {
                 // No results
@@ -173,8 +234,8 @@ export default function Home() {
                 });
               }
             } else {
-              console.error('❌ No tool_result in response:', result);
-              client.realtime.send('conversation.item.create', {
+              logger.error('❌ No tool_result in response:', searchResult);
+              await client.realtime.send('conversation.item.create', {
                 item: {
                   type: 'function_call_output',
                   call_id: item.call_id,
@@ -183,9 +244,10 @@ export default function Home() {
               });
             }
           } catch (error) {
-            console.error('❌ Error handling tool call:', error);
+            logger.error('❌ Error handling tool call:', error);
+            setError('Failed to search documents');
             try {
-              client.realtime.send('conversation.item.create', {
+              await client.realtime.send('conversation.item.create', {
                 item: {
                   type: 'function_call_output',
                   call_id: item.call_id,
@@ -193,44 +255,39 @@ export default function Home() {
                 },
               });
             } catch (e) {
-              console.error('❌ Failed to send error to AI:', e);
+              logger.error('❌ Failed to send error to AI:', e);
             }
           }
         }
       });
 
       // Transcription completion - PRE-SEARCH then trigger response
-      client.realtime.on('server.conversation.item.input_audio_transcription.completed', async (event: any) => {
+      client.realtime.on('server.conversation.item.input_audio_transcription.completed', async (event: TranscriptionEvent) => {
         const transcript = event?.transcript || '';
         if (transcript.trim().length > 0) {
-          console.log('📝 Transcription:', transcript);
+          logger.log('📝 Transcription:', transcript);
+          
+          const sanitizedTranscript = sanitizeInput(transcript);
           
           // Detect if this is a question that needs search
-          const casualPatterns = /^(שלום|היי|הי|מה נשמע|מה קורה|בוקר טוב|ערב טוב|hello|hi|hey|good morning|good evening)\s*[?!.]*\s*$/i;
-          const isGreeting = casualPatterns.test(transcript.trim());
-          const hasQuestionWord = /(מה|איך|למה|מתי|איפה|כמה|האם|what|how|why|when|where|which)/i.test(transcript);
-          const hasQuestionMark = /\?/.test(transcript);
-          const needsSearch = !isGreeting && (hasQuestionWord || hasQuestionMark || transcript.length > 10);
+          const isGreetingText = isGreeting(sanitizedTranscript);
+          const hasQuestion = hasQuestionIndicator(sanitizedTranscript);
+          const needsSearch = !isGreetingText && (hasQuestion || sanitizedTranscript.length > TEXT_ANALYSIS.MIN_QUESTION_LENGTH);
           
           if (needsSearch) {
             // PRE-SEARCH: Call the search tool BEFORE starting the response
-            console.log('🔍 Pre-searching for:', transcript);
+            logger.log('🔍 Pre-searching for:', sanitizedTranscript);
+            setIsSearching(true);
+            setError(null);
+            
             try {
-              const searchResponse = await fetch('/api/tools/call', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  tool_name: 'search_pdfs',
-                  tool_arguments: { query: transcript }
-                }),
-              });
+              const searchResult = await performSearch(sanitizedTranscript);
               
-              if (searchResponse.ok) {
-                const searchResult = await searchResponse.json();
-                const results = searchResult.tool_result?.results || [];
-                const snippets = results.map((r: any) => r.text_snippet).filter(Boolean);
+              if (searchResult?.tool_result) {
+                const results = searchResult.tool_result.results || [];
+                const snippets = results.map((r) => r.text_snippet).filter(Boolean);
                 
-                console.log(`✅ Pre-search found ${snippets.length} results`);
+                logger.log(`✅ Pre-search found ${snippets.length} results`);
                 
                 if (snippets.length > 0) {
                   // Update instructions with the search results BEFORE creating response
@@ -241,7 +298,7 @@ export default function Home() {
                   const enhancedInstructions = `${instructions}
 
 🎯 CONTEXT FOR CURRENT QUERY:
-The user asked: "${transcript}"
+The user asked: "${sanitizedTranscript}"
 
 I have pre-searched the documents and found these relevant sections:
 
@@ -249,29 +306,37 @@ ${contextSnippets}
 
 Now answer the user's question based ONLY on the information above. Answer in Hebrew.`;
 
-                  console.log('📝 Updating instructions with search results before response');
-                  client.updateSession({
-                    instructions: enhancedInstructions,
-                  });
+                  logger.log('📝 Updating instructions with search results before response');
                   
-                  // Wait a moment for the update to take effect
-                  await new Promise(resolve => setTimeout(resolve, 50));
+                  // Update session and wait for response completion instead of arbitrary timeout
+                  await client.updateSession({ instructions: enhancedInstructions });
                   
                   // Create response with the enhanced context
                   client.createResponse();
                   
-                  // Reset instructions after response starts
-                  setTimeout(() => {
+                  // Reset instructions when response is done (not arbitrary timeout)
+                  client.on('response.done', function resetInstructions() {
                     client.updateSession({ instructions: instructions });
-                  }, 200);
+                    client.off('response.done', resetInstructions);
+                  });
                   
+                  setIsSearching(false);
                   return; // Don't call createResponse again below
                 } else {
-                  console.log('⚠️ No results found in pre-search');
+                  logger.log('⚠️ No results found in pre-search');
+                  setError('No relevant information found in documents');
                 }
               }
             } catch (error) {
-              console.error('❌ Pre-search failed:', error);
+              logger.error('❌ Pre-search failed:', error);
+              setError('Failed to search documents. Please try again.');
+              
+              // Still create response but with error context
+              await client.updateSession({
+                instructions: `${instructions}\n\nNOTE: Document search failed. Apologize to user in Hebrew and ask them to try again.`
+              });
+            } finally {
+              setIsSearching(false);
             }
           }
           
@@ -288,16 +353,16 @@ Now answer the user's question based ONLY on the information above. Answer in He
         }
       });
       
-      client.on('conversation.updated', async ({ item, delta }: any) => {
+      client.on('conversation.updated', async ({ item, delta }: ConversationUpdateEvent) => {
         const items = client.conversation.getItems();
         if (delta?.audio) {
           wavStreamPlayer.add16BitPCM(delta.audio, item.id);
         }
-        if (item.status === 'completed' && item.formatted.audio?.length) {
+        if (item.status === 'completed' && item.formatted?.audio?.length) {
           const wavFile = await WavRecorder.decode(
-            item.formatted.audio,
-            24000,
-            24000
+            item.formatted.audio as unknown as ArrayBuffer,
+            AUDIO_CONFIG.SAMPLE_RATE,
+            AUDIO_CONFIG.SAMPLE_RATE
           );
           item.formatted.file = wavFile;
         }
@@ -333,17 +398,20 @@ Now answer the user's question based ONLY on the information above. Answer in He
         });
       } catch (e) {
         // RAG will initialize on first query
+        logger.warn('Pre-load RAG failed:', e);
       }
 
       // Set connected state
       setIsConnected(true);
       setIsConnecting(false);
+      setError(null);
     } catch (error) {
-      console.error('Error connecting:', error);
+      logger.error('Error connecting:', error);
+      setError(error instanceof Error ? error.message : 'Failed to connect');
       setIsConnected(false);
       setIsConnecting(false);
     }
-  }, [isConnecting, isConnected]);
+  }, [isConnecting, isConnected, performSearch]);
 
   const disconnectConversation = useCallback(async () => {
     if (!clientRef.current || !wavRecorderRef.current || !wavStreamPlayerRef.current) return;
@@ -363,18 +431,22 @@ Now answer the user's question based ONLY on the information above. Answer in He
 
   const startRecording = async () => {
     if (!clientRef.current || !wavRecorderRef.current || !wavStreamPlayerRef.current) {
-      console.error('Audio devices not initialized');
+      logger.error('Audio devices not initialized');
+      setError('Audio devices not initialized');
       setIsRecording(false);
       return;
     }
 
     if (!clientRef.current.isConnected()) {
-      console.error('Client not connected');
+      logger.error('Client not connected');
+      setError('Not connected to server');
       setIsRecording(false);
       return;
     }
 
     setIsRecording(true);
+    setError(null);
+    
     const client = clientRef.current;
     const wavRecorder = wavRecorderRef.current;
     const wavStreamPlayer = wavStreamPlayerRef.current;
@@ -394,7 +466,8 @@ Now answer the user's question based ONLY on the information above. Answer in He
         }
       });
     } catch (error) {
-      console.error('Error recording:', error);
+      logger.error('Error recording:', error);
+      setError('Recording failed');
       setIsRecording(false);
     }
   };
@@ -403,11 +476,17 @@ Now answer the user's question based ONLY on the information above. Answer in He
     if (!clientRef.current || !wavRecorderRef.current || !isRecording) return;
 
     setIsRecording(false);
-    await wavRecorderRef.current.pause();
     
-    if (recordedChunkCountRef.current > 0) {
-      await clientRef.current.realtime.send('input_audio_buffer.commit', {});
-      recordedChunkCountRef.current = 0;
+    try {
+      await wavRecorderRef.current.pause();
+      
+      if (recordedChunkCountRef.current > 0) {
+        await clientRef.current.realtime.send('input_audio_buffer.commit', {});
+        recordedChunkCountRef.current = 0;
+      }
+    } catch (error) {
+      logger.error('Error stopping recording:', error);
+      setError('Failed to stop recording');
     }
   };
 
@@ -415,28 +494,52 @@ Now answer the user's question based ONLY on the information above. Answer in He
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [items])
 
+  // Memoize filtered items for performance
+  const displayItems = useMemo(() => 
+    items.filter(item => {
+      // Skip function_call items
+      if (item.type === 'function_call' || item.type === 'function_call_output') {
+        return false;
+      }
+      
+      const text = item.formatted?.text || item.formatted?.transcript || '';
+      
+      // Skip JSON and empty messages
+      if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
+        return false;
+      }
+      
+      if (!text.trim() || text.trim() === '(No content)') {
+        return false;
+      }
+      
+      return true;
+    }),
+    [items]
+  );
+
   return (
     <div className="flex items-center justify-center min-h-screen bg-background">
       <Card className="w-full max-w-2xl mx-auto">
         <CardContent className="p-6 flex flex-col h-[calc(100vh-4rem)]">
+          {/* Error Banner */}
+          {error && (
+            <div className="mb-4 p-3 bg-destructive/10 border border-destructive rounded-lg text-destructive text-sm">
+              {error}
+            </div>
+          )}
+          
+          {/* Searching Indicator */}
+          {isSearching && (
+            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2 text-sm text-blue-700">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>מחפש במסמכים...</span>
+            </div>
+          )}
+          
           <ScrollArea className="flex-grow mb-4 pr-4">
-            {items.map((item, index) => {
-              // Skip function_call items - don't display them to user
-              if (item.type === 'function_call' || item.type === 'function_call_output') {
-                return null;
-              }
-              
-              // Skip if message is only JSON (tool calls)
-              const text = item.formatted.text || item.formatted.transcript || '';
-              
-              if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
-                return null;
-              }
-              
-              // Skip empty messages
-              if (!text.trim() || text.trim() === '(No content)') {
-                return null;
-              }
+            {displayItems.map((item, index) => {
+              const text = item.formatted?.text || item.formatted?.transcript || '';
               
               return (
               <div

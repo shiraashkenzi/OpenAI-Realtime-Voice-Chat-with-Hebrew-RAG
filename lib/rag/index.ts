@@ -1,6 +1,7 @@
 import { loadDocuments, Document } from './pdf-loader';
 import { chunkDocuments, Chunk } from './chunker';
 import { createRetriever, DocumentRetriever, formatSearchResults } from './retriever';
+import { logger } from '@/utils/logger';
 
 // Global singleton for serverless environments
 declare global {
@@ -36,34 +37,34 @@ export class RAGManager {
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
-      console.log('ℹ️  [RAG] Already initialized, skipping...');
+      logger.log('ℹ️  [RAG] Already initialized, skipping...');
       return;
     }
 
     try {
-      console.log('\n🚀 [RAG] Initializing RAG system...\n');
+      logger.log('\n🚀 [RAG] Initializing RAG system...\n');
 
       // Load documents
       this.documents = await loadDocuments();
-      console.log(`\n📚 [RAG] Loaded ${this.documents.length} document(s):`);
+      logger.log(`\n📚 [RAG] Loaded ${this.documents.length} document(s):`);
       this.documents.forEach(doc => {
-        console.log(`   - ${doc.filename}: ${doc.text.length} chars`);
+        logger.log(`   - ${doc.filename}: ${doc.text.length} chars`);
       });
 
       // Chunk documents
       this.chunks = chunkDocuments(this.documents);
-      console.log(`\n📊 [RAG] Total chunks created: ${this.chunks.length}`);
+      logger.log(`\n📊 [RAG] Total chunks created: ${this.chunks.length}`);
       
       // Log key content verification
       const noticeChunks = this.chunks.filter(c => c.content.toLowerCase().includes('שבועיים') || c.content.toLowerCase().includes('weeks'));
       if (noticeChunks.length > 0) {
-        console.log(`✅ [RAG] Found ${noticeChunks.length} chunks containing notice period info`);
+        logger.log(`✅ [RAG] Found ${noticeChunks.length} chunks containing notice period info`);
         noticeChunks.forEach(chunk => {
           const preview = chunk.content.substring(0, 80).replace(/\n/g, ' ');
-          console.log(`    → "${preview}..."`);
+          logger.log(`    → "${preview}..."`);
         });
       } else {
-        console.warn(`⚠️  [RAG] No chunks found with notice period ("שבועיים" or "weeks")`);
+        logger.warn(`⚠️  [RAG] No chunks found with notice period ("שבועיים" or "weeks")`);
       }
 
       // Initialize retriever
@@ -73,12 +74,12 @@ export class RAGManager {
       });
 
       const stats = this.retriever.getStats();
-      console.log(`\n📊 [RAG] System initialized - ${stats.uniqueTerms} terms, ${stats.totalChunks} chunks`);
-      console.log('✅ [RAG] Ready for queries\n');
+      logger.log(`\n📊 [RAG] System initialized - ${stats.uniqueTerms} terms, ${stats.totalChunks} chunks`);
+      logger.log('✅ [RAG] Ready for queries\n');
 
       this.initialized = true;
     } catch (error) {
-      console.error('\n❌ [RAG] Failed to initialize:', error);
+      logger.error('\n❌ [RAG] Failed to initialize:', error);
       throw error;
     }
   }
