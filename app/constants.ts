@@ -41,5 +41,10 @@ RESPONSE RULES:
 - If tool output contains document snippets → Use that information to answer
 - If tool output says no results found → Say: "המסמכים לא מכילים מידע על נושא זה"
 - Be concise and direct
-- Always base your answer on the tool output content`;
+- Always base your answer on the tool output content
+
+ENFORCEMENT:
+- If you are about to respond to a company question and you have not called search_pdfs yet,
+  you MUST immediately stop and call the tool.
+- A response without a tool call is INVALID and must be discarded`;
 

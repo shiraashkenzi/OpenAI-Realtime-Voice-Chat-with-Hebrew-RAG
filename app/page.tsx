@@ -199,10 +199,83 @@ export default function Home() {
         }
       });
 
-      // Transcription completion - trigger response
-      client.realtime.on('server.conversation.item.input_audio_transcription.completed', (event: any) => {
+      // Transcription completion - PRE-SEARCH then trigger response
+      client.realtime.on('server.conversation.item.input_audio_transcription.completed', async (event: any) => {
         const transcript = event?.transcript || '';
         if (transcript.trim().length > 0) {
+          console.log('📝 Transcription:', transcript);
+          
+          // Detect if this is a question that needs search
+          const casualPatterns = /^(שלום|היי|הי|מה נשמע|מה קורה|בוקר טוב|ערב טוב|hello|hi|hey|good morning|good evening)\s*[?!.]*\s*$/i;
+          const isGreeting = casualPatterns.test(transcript.trim());
+          const hasQuestionWord = /(מה|איך|למה|מתי|איפה|כמה|האם|what|how|why|when|where|which)/i.test(transcript);
+          const hasQuestionMark = /\?/.test(transcript);
+          const needsSearch = !isGreeting && (hasQuestionWord || hasQuestionMark || transcript.length > 10);
+          
+          if (needsSearch) {
+            // PRE-SEARCH: Call the search tool BEFORE starting the response
+            console.log('🔍 Pre-searching for:', transcript);
+            try {
+              const searchResponse = await fetch('/api/tools/call', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tool_name: 'search_pdfs',
+                  tool_arguments: { query: transcript }
+                }),
+              });
+              
+              if (searchResponse.ok) {
+                const searchResult = await searchResponse.json();
+                const results = searchResult.tool_result?.results || [];
+                const snippets = results.map((r: any) => r.text_snippet).filter(Boolean);
+                
+                console.log(`✅ Pre-search found ${snippets.length} results`);
+                
+                if (snippets.length > 0) {
+                  // Update instructions with the search results BEFORE creating response
+                  const contextSnippets = snippets.map((s: string, i: number) => 
+                    `קטע ${i + 1}:\n${s}`
+                  ).join('\n\n---\n\n');
+                  
+                  const enhancedInstructions = `${instructions}
+
+🎯 CONTEXT FOR CURRENT QUERY:
+The user asked: "${transcript}"
+
+I have pre-searched the documents and found these relevant sections:
+
+${contextSnippets}
+
+Now answer the user's question based ONLY on the information above. Answer in Hebrew.`;
+
+                  console.log('📝 Updating instructions with search results before response');
+                  client.updateSession({
+                    instructions: enhancedInstructions,
+                  });
+                  
+                  // Wait a moment for the update to take effect
+                  await new Promise(resolve => setTimeout(resolve, 50));
+                  
+                  // Create response with the enhanced context
+                  client.createResponse();
+                  
+                  // Reset instructions after response starts
+                  setTimeout(() => {
+                    client.updateSession({ instructions: instructions });
+                  }, 200);
+                  
+                  return; // Don't call createResponse again below
+                } else {
+                  console.log('⚠️ No results found in pre-search');
+                }
+              }
+            } catch (error) {
+              console.error('❌ Pre-search failed:', error);
+            }
+          }
+          
+          // For greetings or if search failed, just create normal response
           client.createResponse();
         }
       });
